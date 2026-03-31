@@ -1,349 +1,191 @@
 """
-macrogym/economy.py
-────────────────────
-Main MacroEconomy class — the public API for MacroGym.
+macrogym/transitions.py
+────────────────────────
+Nonlinear state-dependent transition functions for the synthetic economy.
 
-MacroGym is a controlled nonlinear macroeconomic environment for
-benchmarking counterfactual methods. It provides:
+The transition matrix A(F_t) determines how factors evolve:
 
-  1. Trajectory simulation with known dynamics
-  2. Exact ground-truth counterfactuals (via re-simulation or analytical)
-  3. Standardised evaluation metrics for model comparison
+    F_{t+1} = A(F_t) · F_t + Σ(F_t)^{1/2} · ε_t
 
-Why MacroGym instead of DSGE or agent-based models
-───────────────────────────────────────────────────
-DSGE models encode specific theoretical assumptions (rational expectations,
-log-linearisation) that contaminate the benchmark — a model that matches
-DSGE assumptions passes the test trivially regardless of its quality.
+where A(F_t) and Σ(F_t) both depend on the current state.
 
-Agent-based models are realistic but their counterfactuals are not
-analytically tractable — you cannot compute the true causal effect,
-only simulate it with noise, which makes the validation metric noisy.
+Design principles
+─────────────────
+1. Nonlinearity is controlled by a single scalar parameter ∈ [0, 1].
+   At 0 the economy is a linear VAR — the VAR wins every benchmark.
+   At 1 the economy is maximally nonlinear — only flexible models work.
+   Intermediate values produce calibrated challenges.
 
-MacroGym provides exact ground-truth counterfactuals by design.
-The data-generating process is fully known, so the true causal effect
-of any shock is computable to machine precision. This makes it the
-first controlled benchmark for counterfactual evaluation in macroeconomics.
+2. Nonlinearities are economically motivated:
+   - Regime asymmetry: recessions propagate differently from expansions
+   - Volatility clustering: uncertainty rises during downturns
+   - Transmission nonlinearity: monetary policy has larger effects at extremes
+   
+3. The true causal effect of a shock is computable analytically for the
+   linear component and by exact re-simulation for the nonlinear component.
 
-Factor interpretation (default k=5)
-────────────────────────────────────
-    F0 — real activity       (output gap / growth)
-    F1 — inflation           (price level dynamics)
-    F2 — monetary policy     (interest rate gap)
-    F3 — financial conditions (credit spreads / risk)
-    F4 — external sector     (trade / commodity prices)
+Factor interpretation (default k=5):
+   F0 — real activity (output gap / growth)
+   F1 — inflation
+   F2 — monetary policy stance (interest rate gap)
+   F3 — financial conditions (credit spreads)
+   F4 — external sector (trade / commodity prices)
 """
 
 import numpy as np
-import pandas as pd
-from typing import Optional, Tuple, Dict, Union
-
-from macrogym.transitions import NonlinearTransition, A_NORMAL, A_RECESSION, SIGMA_BASE
-from macrogym.shocks import (
-    CounterfactualResult,
-    counterfactual_resimulation,
-    counterfactual_analytical,
-    counterfactual_montecarlo,
-    evaluate_model_counterfactual,
-)
+from typing import Tuple
 
 
-FACTOR_NAMES = ["RealActivity", "Inflation", "MonetaryPolicy",
-                "FinancialConditions", "ExternalSector"]
+# ── Default structural matrices ───────────────────────────────────────────────
+# Calibrated to produce realistic impulse responses:
+#   - Real activity is persistent (0.85 own-lag)
+#   - Inflation responds to activity (Phillips curve)
+#   - Monetary policy responds to inflation (Taylor rule)
+#   - Financial conditions amplify downturns (accelerator)
+#   - External sector is exogenous but affects activity
+
+A_NORMAL = np.array([
+    [0.85,  0.00,  -0.10,  -0.15,   0.20],   # F0 real activity
+    [0.15,  0.75,   0.00,   0.05,   0.10],   # F1 inflation
+    [0.05,  0.30,   0.80,   0.00,   0.00],   # F2 monetary policy
+    [-0.20, 0.00,  -0.10,   0.70,   0.00],   # F3 financial conditions
+    [0.00,  0.00,   0.00,   0.00,   0.90],   # F4 external sector
+], dtype=np.float64)
+
+# Recession regime — tighter financial accelerator, stronger monetary response
+A_RECESSION = np.array([
+    [0.70,  0.00,  -0.15,  -0.35,   0.15],   # F0 more sensitive to finance
+    [0.10,  0.80,   0.00,   0.10,   0.05],   # F1 inflation stickier
+    [0.08,  0.35,   0.82,   0.00,   0.00],   # F2 stronger policy response
+    [-0.35, 0.00,  -0.15,   0.75,   0.00],   # F3 financial amplification
+    [0.00,  0.00,   0.00,   0.00,   0.88],   # F4 external weakens
+], dtype=np.float64)
+
+# Base noise covariance — calibrated to unit factor variance
+SIGMA_BASE = np.diag([0.30, 0.20, 0.15, 0.25, 0.20]) ** 2
 
 
-class MacroEconomy:
+class NonlinearTransition:
     """
-    Synthetic nonlinear macroeconomy for counterfactual benchmarking.
+    State-dependent nonlinear transition for the synthetic economy.
+
+    The transition interpolates smoothly between a normal regime matrix
+    and a recession regime matrix based on the current state of real
+    activity (F0):
+
+        r_t = sigmoid(-sharpness · F0_t)     ∈ [0,1]
+        A_t = (1 - r_t) · A_normal + r_t · A_recession
+
+    r_t ≈ 0 in expansions (F0 > 0) → A_normal applies
+    r_t ≈ 1 in recessions (F0 < 0) → A_recession applies
+
+    Stochastic volatility: noise variance scales with monetary tightness:
+        Σ_t = Σ_base · exp(vol_sensitivity · |F2_t|)
 
     Parameters
     ──────────
-    n_factors : int
-        Number of factors (default 5, matches default structural matrices).
     nonlinearity : float ∈ [0, 1]
-        Regime-switching strength.
-        0 → linear VAR (TVP-VAR should win)
-        1 → fully nonlinear (flexible models needed)
-        0.5 → recommended for benchmarking
+        Strength of regime-switching. 0 = pure linear VAR, 1 = full asymmetry.
     sharpness : float
-        Speed of regime transition (higher = more abrupt).
+        Speed of regime transition. Higher = more abrupt switch.
     vol_sensitivity : float
-        Stochastic volatility sensitivity (0 = homoskedastic).
-    seed : int
-        Master random seed for reproducibility.
-
-    Example
-    ───────
-    >>> env = MacroEconomy(nonlinearity=0.5, seed=42)
-    >>> traj = env.simulate(T=500)
-    >>> result = env.counterfactual(traj, shock_time=300,
-    ...                             shock_factor=0, shock_size=-2.0,
-    ...                             horizon=24)
-    >>> print(result.causal_effect[:6, :2])  # F0, F1 for first 6 months
+        Degree of stochastic volatility. 0 = homoskedastic.
+    A_normal : np.ndarray (k, k)
+        Transition matrix in normal/expansion regime.
+    A_recession : np.ndarray (k, k)
+        Transition matrix in recession regime.
+    sigma_base : np.ndarray (k, k)
+        Base noise covariance.
     """
 
     def __init__(self,
-                 n_factors:       int   = 5,
                  nonlinearity:    float = 0.5,
                  sharpness:       float = 2.0,
                  vol_sensitivity: float = 0.3,
-                 seed:            int   = 42):
+                 A_normal:        np.ndarray = A_NORMAL,
+                 A_recession:     np.ndarray = A_RECESSION,
+                 sigma_base:      np.ndarray = SIGMA_BASE):
 
-        assert 0.0 <= nonlinearity <= 1.0, "nonlinearity must be in [0, 1]"
-        assert n_factors == 5, \
-            "Currently only n_factors=5 is supported (matches default matrices). " \
-            "Custom matrices via MacroEconomy.from_matrices() for other sizes."
-
-        self.k               = n_factors
         self.nonlinearity    = nonlinearity
-        self.seed            = seed
-        self.factor_names    = FACTOR_NAMES[:n_factors]
+        self.sharpness       = sharpness
+        self.vol_sensitivity = vol_sensitivity
+        self.A_normal        = A_normal.copy()
+        self.A_recession     = A_recession.copy()
+        self.delta_A         = A_recession - A_normal   # (k, k)
+        self.sigma_base      = sigma_base.copy()
+        self.k               = A_normal.shape[0]
 
-        self.transition = NonlinearTransition(
-            nonlinearity    = nonlinearity,
-            sharpness       = sharpness,
-            vol_sensitivity = vol_sensitivity,
-            A_normal        = A_NORMAL,
-            A_recession     = A_RECESSION,
-            sigma_base      = SIGMA_BASE,
-        )
-
-        self._rng = np.random.default_rng(seed)
-        self._last_trajectory = None
-        self._last_noises     = None
-        self._factor_stds     = None
-
-    @classmethod
-    def from_matrices(cls,
-                      A_normal:    np.ndarray,
-                      A_recession: np.ndarray,
-                      sigma_base:  np.ndarray,
-                      nonlinearity: float = 0.5,
-                      seed: int = 42) -> "MacroEconomy":
+    def regime_weight(self, F_t: np.ndarray) -> float:
         """
-        Create a MacroEconomy with custom transition matrices.
-        Useful for calibrating to specific economy data.
+        Smooth regime weight r_t ∈ [0, 1].
+        r_t = 0 → expansion (A_normal)
+        r_t = 1 → recession (A_recession)
+        Driven by F0 (real activity).
         """
-        k = A_normal.shape[0]
-        env = cls.__new__(cls)
-        env.k = k
-        env.nonlinearity = nonlinearity
-        env.seed = seed
-        env.factor_names = [f"F{i}" for i in range(k)]
-        env.transition = NonlinearTransition(
-            nonlinearity=nonlinearity,
-            A_normal=A_normal,
-            A_recession=A_recession,
-            sigma_base=sigma_base,
-        )
-        env._rng = np.random.default_rng(seed)
-        env._last_trajectory = None
-        env._last_noises = None
-        env._factor_stds = None
-        return env
+        return 1.0 / (1.0 + np.exp(self.sharpness * F_t[0]))
 
-    # ── Simulation ────────────────────────────────────────────────────────────
-
-    def simulate(self, T: int = 500,
-                 F0: Optional[np.ndarray] = None,
-                 burn_in: int = 100) -> np.ndarray:
+    def transition_matrix(self, F_t: np.ndarray) -> np.ndarray:
         """
-        Simulate a trajectory of T months.
+        State-dependent transition matrix A(F_t).
 
-        Parameters
-        ──────────
-        T       : length of trajectory to return (after burn-in)
-        F0      : initial state (default: zeros)
-        burn_in : number of initial steps to discard for stationarity
+        A(F_t) = A_normal + nonlinearity · r_t · ΔA
 
-        Returns
-        ───────
-        trajectory : (T, k) factor panel
-            Also stored in self._last_trajectory and self._last_noises
-            for use in counterfactual() without re-simulating.
+        Linear when nonlinearity=0: A(F_t) = A_normal for all F_t.
         """
-        T_total = T + burn_in
-        F0 = np.zeros(self.k) if F0 is None else F0.copy()
+        r = self.regime_weight(F_t)
+        return self.A_normal + self.nonlinearity * r * self.delta_A
 
-        trajectory = np.zeros((T_total, self.k))
-        noises     = np.zeros((T_total, self.k))
-        trajectory[0] = F0
-
-        for t in range(T_total - 1):
-            F_next, noise = self.transition.step(trajectory[t], self._rng)
-            trajectory[t + 1] = F_next
-            noises[t + 1]     = noise
-
-        # Discard burn-in
-        trajectory = trajectory[burn_in:]
-        noises     = noises[burn_in:]
-
-        # Compute factor stds on first 70% (training window equivalent)
-        train_end = int(0.7 * T)
-        self._factor_stds = trajectory[:train_end].std(axis=0)
-        self._factor_stds[self._factor_stds == 0] = 1.0
-
-        self._last_trajectory = trajectory
-        self._last_noises     = noises
-
-        return trajectory
-
-    def simulate_to_dataframe(self, T: int = 500,
-                               start_date: str = "1950-01-01") -> pd.DataFrame:
-        """Simulate and return as a pandas DataFrame with monthly index."""
-        traj = self.simulate(T)
-        idx  = pd.date_range(start_date, periods=T, freq="MS")
-        return pd.DataFrame(traj, index=idx, columns=self.factor_names)
-
-    # ── Counterfactuals ───────────────────────────────────────────────────────
-
-    def counterfactual(self,
-                       trajectory:   Optional[np.ndarray] = None,
-                       shock_time:   int = 300,
-                       shock_factor: int = 0,
-                       shock_size:   float = -2.0,
-                       horizon:      int = 24,
-                       method:       str = "resimulation") -> CounterfactualResult:
+    def noise_covariance(self, F_t: np.ndarray) -> np.ndarray:
         """
-        Compute an exact counterfactual for a shock.
+        State-dependent noise covariance Σ(F_t).
 
-        Parameters
-        ──────────
-        trajectory   : (T, k) factor panel. If None, uses last simulated.
-        shock_time   : time index (0-based) when shock is applied.
-        shock_factor : which factor to shock (0=RealActivity default).
-        shock_size   : shock magnitude in std devs (negative=contractionary).
-        horizon      : how many months to simulate after shock.
-        method       : "resimulation" | "analytical" | "montecarlo"
-            resimulation — exact, uses stored noise path (default)
-            analytical   — local linear approximation (fast, exact for linear)
-            montecarlo   — average over N noise seeds (N=200 default)
+        Σ(F_t) = Σ_base · exp(vol_sensitivity · |F2_t|)
 
-        Returns
-        ───────
-        CounterfactualResult with exact causal effects.
+        Volatility rises when monetary policy is far from neutral.
+        Zero vol_sensitivity → homoskedastic baseline.
         """
-        if trajectory is None:
-            assert self._last_trajectory is not None, \
-                "Call simulate() first or pass a trajectory."
-            trajectory = self._last_trajectory
-            noises     = self._last_noises
-        else:
-            # If external trajectory passed, generate noises by re-simulation
-            # from stored seed — caller must use self._last_noises if available
-            noises = self._last_noises if self._last_noises is not None else \
-                     np.zeros_like(trajectory)
+        scale = np.exp(self.nonlinearity * self.vol_sensitivity * abs(F_t[2]))
+        return self.sigma_base * scale
 
-        assert self._factor_stds is not None, \
-            "Factor stds not computed. Call simulate() first."
-
-        if method == "resimulation":
-            return counterfactual_resimulation(
-                trajectory   = trajectory,
-                noises       = noises,
-                transition   = self.transition,
-                shock_time   = shock_time,
-                shock_factor = shock_factor,
-                shock_size   = shock_size,
-                factor_stds  = self._factor_stds,
-                horizon      = horizon,
-            )
-        elif method == "analytical":
-            F_shock = trajectory[shock_time]
-            irf = counterfactual_analytical(
-                F_shock_time = F_shock,
-                transition   = self.transition,
-                shock_factor = shock_factor,
-                shock_size   = shock_size,
-                factor_stds  = self._factor_stds,
-                horizon      = horizon,
-            )
-            baseline = trajectory[shock_time : shock_time + horizon]
-            return CounterfactualResult(
-                baseline       = baseline.copy(),
-                counterfactual = baseline + irf,
-                causal_effect  = irf,
-                shock_factor   = shock_factor,
-                shock_size     = shock_size,
-                shock_time     = shock_time,
-                horizon        = horizon,
-                method         = "analytical",
-            )
-        elif method == "montecarlo":
-            return counterfactual_montecarlo(
-                trajectory   = trajectory,
-                noises       = noises,
-                transition   = self.transition,
-                shock_time   = shock_time,
-                shock_factor = shock_factor,
-                shock_size   = shock_size,
-                factor_stds  = self._factor_stds,
-                horizon      = horizon,
-            )
-        else:
-            raise ValueError(f"Unknown method: {method}. "
-                             f"Use 'resimulation', 'analytical', or 'montecarlo'.")
-
-    def evaluate(self,
-                 model_counterfactual: np.ndarray,
-                 model_baseline:       np.ndarray,
-                 true_result:          CounterfactualResult) -> Dict[str, float]:
+    def step(self, F_t: np.ndarray,
+             rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Evaluate a model's counterfactual against the ground truth.
+        One-step transition: F_t → F_{t+1}.
 
-        model_counterfactual : (horizon, k)  model's CF trajectory
-        model_baseline       : (horizon, k)  model's baseline trajectory
-        true_result          : CounterfactualResult from self.counterfactual()
-
-        Returns dict of metrics:
-            direction_accuracy  — fraction of correct sign predictions
-            sign_error_rate     — fraction of wrong sign predictions
-            rmse_effect         — RMSE of causal effect
-            mae_effect          — MAE of causal effect
-            corr_effect         — correlation of model vs true effect
-            dir_acc_F{i}        — per-factor direction accuracy
+        Returns (F_{t+1}, noise) where noise is the drawn innovation.
+        Returning noise separately enables exact counterfactual re-simulation
+        with the same noise draw but a different initial state.
         """
-        return evaluate_model_counterfactual(
-            model_cf   = model_counterfactual,
-            model_base = model_baseline,
-            true_result = true_result,
-        )
+        A   = self.transition_matrix(F_t)
+        Sig = self.noise_covariance(F_t)
+        L   = np.linalg.cholesky(Sig)
+        eps = rng.standard_normal(self.k)
+        noise = L @ eps
+        return A @ F_t + noise, noise
 
-    # ── Utilities ─────────────────────────────────────────────────────────────
-
-    def get_train_test_split(self, trajectory: np.ndarray,
-                              train_frac: float = 0.7
-                              ) -> Tuple[np.ndarray, np.ndarray]:
-        """Split trajectory into train and test windows."""
-        T      = len(trajectory)
-        t_end  = int(train_frac * T)
-        return trajectory[:t_end], trajectory[t_end:]
-
-    def expected_irf(self, F_t: np.ndarray,
-                     shock_factor: int,
-                     shock_size: float,
-                     horizon: int) -> np.ndarray:
+    def step_deterministic(self, F_t: np.ndarray,
+                            noise: np.ndarray) -> np.ndarray:
         """
-        Analytical impulse response function at state F_t.
-        Returns causal_effect : (horizon, k).
+        One-step transition with fixed noise draw.
+        Used for exact counterfactual re-simulation:
+            F_cf_{t+1} = A(F_cf_t) · F_cf_t + noise_t
+        where noise_t is the same draw as in the baseline.
+        This isolates the causal effect of the shock from noise.
         """
-        assert self._factor_stds is not None
-        return counterfactual_analytical(
-            F_shock_time = F_t,
-            transition   = self.transition,
-            shock_factor = shock_factor,
-            shock_size   = shock_size,
-            factor_stds  = self._factor_stds,
-            horizon      = horizon,
-        )
+        A = self.transition_matrix(F_t)
+        return A @ F_t + noise
 
-    @property
-    def factor_stds(self) -> np.ndarray:
-        """Per-factor standard deviations from training window."""
-        assert self._factor_stds is not None, "Call simulate() first."
-        return self._factor_stds
+    def expected_next(self, F_t: np.ndarray) -> np.ndarray:
+        """
+        Expected next state E[F_{t+1} | F_t] = A(F_t) · F_t.
+        Used for analytical counterfactual computation.
+        """
+        return self.transition_matrix(F_t) @ F_t
 
-    def __repr__(self) -> str:
-        return (f"MacroEconomy(k={self.k}, "
-                f"nonlinearity={self.nonlinearity}, "
-                f"seed={self.seed})")
+    def linear_approximation(self, F_t: np.ndarray) -> np.ndarray:
+        """
+        First-order Taylor expansion of A(F_t) around F_t.
+        Used for analytical impulse response computation.
+        Returns the effective A matrix at F_t.
+        """
+        return self.transition_matrix(F_t)
