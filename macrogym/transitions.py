@@ -53,12 +53,14 @@ A_NORMAL = np.array([
 ], dtype=np.float64)
 
 # Recession regime — tighter financial accelerator, stronger monetary response
+# A_RECESSION is rescaled to spectral radius 0.92 (stable, below A_NORMAL's 0.93)
+# Raw matrix had sr=1.077 which caused explosive trajectories
 A_RECESSION = np.array([
-    [0.70,  0.00,  -0.15,  -0.35,   0.15],   # F0 more sensitive to finance
-    [0.10,  0.80,   0.00,   0.10,   0.05],   # F1 inflation stickier
-    [0.08,  0.35,   0.82,   0.00,   0.00],   # F2 stronger policy response
-    [-0.35, 0.00,  -0.15,   0.75,   0.00],   # F3 financial amplification
-    [0.00,  0.00,   0.00,   0.00,   0.88],   # F4 external weakens
+    [ 0.5980,  0.0000, -0.1281, -0.2990,  0.1281],  # F0 more sensitive to finance
+    [ 0.0854,  0.6834,  0.0000,  0.0854,  0.0427],  # F1 inflation stickier
+    [ 0.0683,  0.2990,  0.7005,  0.0000,  0.0000],  # F2 stronger policy response
+    [-0.2990,  0.0000, -0.1281,  0.6407,  0.0000],  # F3 financial amplification
+    [ 0.0000,  0.0000,  0.0000,  0.0000,  0.7517],  # F4 external weakens
 ], dtype=np.float64)
 
 # Base noise covariance — calibrated to unit factor variance
