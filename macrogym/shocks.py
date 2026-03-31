@@ -104,13 +104,15 @@ def counterfactual_resimulation(
     F_shocked, delta_F = inject_shock(
         trajectory[shock_time], shock_factor, shock_size, factor_stds)
 
-    # Re-simulate from shock_time using the same noise draws
-    baseline_window = trajectory[shock_time : shock_time + horizon]  # (H, k)
+    # Re-simulate from shock_time using the same noise draws.
+    # noises[t] is the noise that produced trajectory[t] FROM trajectory[t-1].
+    # So to re-simulate trajectory[shock_time+1], we need noises[shock_time+1].
+    baseline_window = trajectory[shock_time + 1 : shock_time + 1 + horizon]
     cf_window = np.zeros((horizon, k))
     F_curr = F_shocked.copy()
 
     for h in range(horizon):
-        noise = noises[shock_time + h]
+        noise = noises[shock_time + 1 + h]   # noise that produced step h+1
         F_curr = transition.step_deterministic(F_curr, noise)
         cf_window[h] = F_curr
 

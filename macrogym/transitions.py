@@ -122,7 +122,8 @@ class NonlinearTransition:
         r_t = 1 → recession (A_recession)
         Driven by F0 (real activity).
         """
-        return 1.0 / (1.0 + np.exp(self.sharpness * F_t[0]))
+        x = np.clip(self.sharpness * F_t[0], -500, 500)
+        return 1.0 / (1.0 + np.exp(x))
 
     def transition_matrix(self, F_t: np.ndarray) -> np.ndarray:
         """
@@ -144,7 +145,8 @@ class NonlinearTransition:
         Volatility rises when monetary policy is far from neutral.
         Zero vol_sensitivity → homoskedastic baseline.
         """
-        scale = np.exp(self.nonlinearity * self.vol_sensitivity * abs(F_t[2]))
+        exponent = np.clip(self.nonlinearity * self.vol_sensitivity * abs(F_t[2]), -10, 3)
+        scale = np.exp(exponent)
         return self.sigma_base * scale
 
     def step(self, F_t: np.ndarray,
