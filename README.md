@@ -1,21 +1,26 @@
 # MacroGym
-**Controlled nonlinear macroeconomic benchmark for counterfactual evaluation of world models.**
+**A macroeconomic simulator with ground-truth counterfactuals for testing causal predictions.**
 
-MacroGym provides exact ground-truth counterfactuals for evaluating whether a macroeconomic world model correctly captures the causal effect of policy shocks. It is the first controlled benchmark specifically designed for this task.
+MacroGym generates synthetic economies where the *true effect* of a policy shock is known. This makes it possible to directly evaluate whether a model correctly captures causal relationships, something that cannot be verified using real-world data.
 
 ## Why MacroGym?
 
-| Benchmark | Exact CF from true DGP | Nonlinear DGP | No model assumptions |
+Most macro models cannot be tested on counterfactuals, because the true outcome is never observed. MacroGym fixes this by providing exact ground-truth counterfactuals.
+
+| Benchmark | Ground-truth counterfactuals | Nonlinear dynamics | Model-free evaluation |
 |---|---|---|---|
-| DSGE model | ✗ (assumes DSGE is true) | ✓ | ✗ |
+| DSGE model | ✗ (answers depend on its own assumptions) | ✓ | ✗ |
 | Agent-based | ✗ (noisy simulation) | ✓ | ✓ |
-| Linear VAR | ✗ (misspecified under nonlinearity) | ✗ | ✗ |
+| Linear VAR | ✗ (biased under nonlinearity) | ✗ | ✗ |
 | **MacroGym** | **✓ (exact re-simulation)** | **✓** | **✓** |
 
-DSGE counterfactuals contaminate the benchmark with their own assumptions — a model that mimics DSGE assumptions passes trivially. Agent-based counterfactuals are noisy and not analytically tractable. Linear VAR counterfactuals are exact under the VAR model but systematically biased when the true DGP is nonlinear. MacroGym provides exact causal effects from a fully specified nonlinear DGP with known parameters.
+DSGE counterfactuals contaminate evaluation with their own structural assumptions: a model that mirrors those assumptions can appear correct by construction rather than by capturing the true causal mechanism. Agent-based approaches generate counterfactuals, but with simulation noise that makes precise evaluation difficult. Linear VAR methods are exact only under linear dynamics and become systematically biased when the true system is nonlinear.
+
+MacroGym instead provides exact causal effects from a fully specified nonlinear data-generating process with known parameters, enabling direct and model-independent evaluation.
 
 ## Quick start
 ```python
+'Create a synthetic economy and test your model`s causal predictions'
 from macrogym import MacroEconomy
 
 # Default k=5 economy
@@ -59,7 +64,7 @@ uv sync
 
 ## Factor structure
 
-The default economy has 5 factors mirroring standard macro decompositions:
+The default economy includes 5 interpretable macro factors:
 
 | Factor | Interpretation | Key transmission |
 |---|---|---|
@@ -81,6 +86,9 @@ The `nonlinearity` parameter controls the degree of regime-switching:
 
 ## Counterfactual methods
 ```python
+# Default (recommended)
+result = env.counterfactual(...)
+
 # Exact re-simulation (default — uses stored noise path)
 result = env.counterfactual(..., method="resimulation")
 
