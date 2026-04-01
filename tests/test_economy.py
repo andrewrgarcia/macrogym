@@ -84,3 +84,40 @@ def test_nonlinearity_increases_var_error():
         errors.append(scores["rmse_effect"])
     assert errors[0] <= errors[1] + 0.05, \
         f"Expected nl=0 error <= nl=0.5 error, got {errors}"
+
+
+def test_arbitrary_k():
+    """MacroEconomy should work for any k >= 2."""
+    for k in [2, 5, 10, 20]:
+        env  = MacroEconomy(n_factors=k, seed=42)
+        traj = env.simulate(T=200)
+        assert traj.shape == (200, k), f"Expected (200, {k}), got {traj.shape}"
+        res  = env.counterfactual(shock_time=150, shock_factor=0,
+                                   shock_size=-1.0, horizon=6)
+        assert res.causal_effect.shape == (6, k)
+
+
+def test_with_dimension():
+    """with_dimension factory should work cleanly."""
+    env  = MacroEconomy.with_dimension(k=20, nonlinearity=0.5, seed=42)
+    traj = env.simulate(T=300)
+    assert traj.shape == (300, 20)
+    assert env.k == 20
+    res  = env.counterfactual(shock_time=200, shock_factor=0,
+                               shock_size=-2.0, horizon=12)
+    assert res.causal_effect.shape == (12, 20)
+    # Direction should be negative on F0 at h=1
+    assert res.causal_effect[0, 0] < 0
+
+
+def test_make_structural_matrices():
+    """Generated matrices should be stable."""
+    import numpy as np
+    from macrogym import make_structural_matrices
+    for k in [5, 10, 20]:
+        A_n, A_r, sig = make_structural_matrices(k, seed=0)
+        assert A_n.shape == (k, k)
+        sr_n = max(abs(np.linalg.eigvals(A_n)))
+        sr_r = max(abs(np.linalg.eigvals(A_r)))
+        assert sr_n < 1.0, f"A_normal unstable at k={k}: sr={sr_n}"
+        assert sr_r < 1.0, f"A_recession unstable at k={k}: sr={sr_r}"

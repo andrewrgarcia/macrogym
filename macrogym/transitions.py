@@ -36,6 +36,89 @@ import numpy as np
 from typing import Tuple
 
 
+def make_structural_matrices(k: int, seed: int = 42) -> tuple:
+    """
+    Generate economically calibrated transition matrices for arbitrary k.
+
+    The matrices follow a block structure:
+      - Diagonal: persistence (0.7-0.9, mean-reverting)
+      - Off-diagonal: cross-factor transmission (sparse, signed)
+      - First factor drives all others (global activity factor)
+      - Last factor is exogenous (external sector)
+
+    Returns (A_normal, A_recession, sigma_base) as numpy arrays of shape (k, k).
+
+    Parameters
+    ──────────
+    k    : number of factors
+    seed : random seed for reproducibility
+
+    Example
+    ───────
+    >>> A_normal, A_recession, sigma_base = make_structural_matrices(k=20)
+    >>> env = MacroEconomy.from_matrices(A_normal, A_recession, sigma_base)
+    """
+    rng = np.random.default_rng(seed)
+
+    # ── A_normal: expansion regime ────────────────────────────────────────
+    A = np.zeros((k, k))
+
+    # Diagonal persistence: 0.75-0.90
+    persistence = rng.uniform(0.75, 0.90, k)
+    np.fill_diagonal(A, persistence)
+
+    # F0 (real activity) drives all other factors
+    A[1:, 0] = rng.uniform(0.05, 0.20, k-1) * rng.choice([-1, 1], k-1)
+
+    # Monetary policy (F2 if k>=3) responds to inflation (F1 if k>=2)
+    if k >= 3:
+        A[2, 1] = rng.uniform(0.15, 0.35)   # Taylor rule: rates respond to inflation
+
+    # Financial conditions (F3 if k>=4) amplify activity
+    if k >= 4:
+        A[3, 0] = rng.uniform(-0.15, -0.05)  # tighter conditions in downturns
+
+    # Sparse random cross-factor effects
+    n_extra = max(0, k - 4)
+    for i in range(4, k):
+        j = rng.integers(0, min(i, 4))
+        A[i, j] = rng.uniform(0.03, 0.12) * rng.choice([-1, 1])
+
+    # Last factor: exogenous (external sector) — very sparse
+    A[-1, :] = 0.0
+    A[-1, -1] = rng.uniform(0.85, 0.92)
+
+    A_normal = A.copy()
+
+    # Ensure stability: scale if spectral radius >= 1
+    sr = max(abs(np.linalg.eigvals(A_normal)))
+    if sr >= 1.0:
+        A_normal *= 0.95 / sr
+
+    # ── A_recession: tighter financial, stronger transmission ─────────────
+    A_recession = A_normal.copy()
+    # Amplify financial accelerator
+    if k >= 4:
+        A_recession[3, 0] *= 1.8
+    # Reduce persistence slightly (faster mean-reversion in recessions)
+    for i in range(k):
+        A_recession[i, i] *= rng.uniform(0.85, 0.95)
+
+    sr_r = max(abs(np.linalg.eigvals(A_recession)))
+    if sr_r >= 1.0:
+        A_recession *= 0.92 / sr_r
+
+    # ── Noise covariance: diagonal, calibrated to unit factor variance ────
+    # σ_i chosen so var(F_i) ≈ 1 in steady state
+    noise_std = rng.uniform(0.15, 0.35, k)
+    noise_std[0] *= 1.5   # real activity more volatile
+    if k >= 4:
+        noise_std[3] *= 1.3   # financial conditions volatile
+    sigma_base = np.diag(noise_std ** 2)
+
+    return A_normal, A_recession, sigma_base
+
+
 # ── Default structural matrices ───────────────────────────────────────────────
 # Calibrated to produce realistic impulse responses:
 #   - Real activity is persistent (0.85 own-lag)
@@ -147,7 +230,8 @@ class NonlinearTransition:
         Volatility rises when monetary policy is far from neutral.
         Zero vol_sensitivity → homoskedastic baseline.
         """
-        exponent = np.clip(self.nonlinearity * self.vol_sensitivity * abs(F_t[2]), -10, 3)
+        idx      = min(2, len(F_t) - 1)  # use F2 if available, else last factor
+        exponent = np.clip(self.nonlinearity * self.vol_sensitivity * abs(F_t[idx]), -10, 3)
         scale = np.exp(exponent)
         return self.sigma_base * scale
 

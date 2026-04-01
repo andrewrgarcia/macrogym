@@ -38,7 +38,7 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Tuple, Dict, Union
 
-from macrogym.transitions import NonlinearTransition, A_NORMAL, A_RECESSION, SIGMA_BASE
+from macrogym.transitions import NonlinearTransition, A_NORMAL, A_RECESSION, SIGMA_BASE, make_structural_matrices
 from macrogym.shocks import (
     CounterfactualResult,
     counterfactual_resimulation,
@@ -87,27 +87,35 @@ class MacroEconomy:
                  nonlinearity:    float = 0.5,
                  sharpness:       float = 2.0,
                  vol_sensitivity: float = 0.3,
-                 seed:            int   = 42):
+                 seed:            int   = 42,
+                 matrix_seed:     int   = 0):
 
         assert 0.0 <= nonlinearity <= 1.0, "nonlinearity must be in [0, 1]"
-        assert n_factors == 5, \
-            "Currently only n_factors=5 is supported (matches default matrices). " \
-            "Custom matrices via MacroEconomy.from_matrices() for other sizes."
+        assert n_factors >= 2, "n_factors must be at least 2"
 
         self.k               = n_factors
         self.nonlinearity    = nonlinearity
         self.seed            = seed
-        self.factor_names    = FACTOR_NAMES[:n_factors]
+        self.factor_names    = (FACTOR_NAMES[:n_factors]
+                                if n_factors <= len(FACTOR_NAMES)
+                                else [f"F{i}" for i in range(n_factors)])
+
+        if n_factors == 5:
+            A_normal    = A_NORMAL
+            A_recession = A_RECESSION
+            sigma_base  = SIGMA_BASE
+        else:
+            A_normal, A_recession, sigma_base = make_structural_matrices(
+                n_factors, seed=matrix_seed)
 
         self.transition = NonlinearTransition(
             nonlinearity    = nonlinearity,
             sharpness       = sharpness,
             vol_sensitivity = vol_sensitivity,
-            A_normal        = A_NORMAL,
-            A_recession     = A_RECESSION,
-            sigma_base      = SIGMA_BASE,
+            A_normal        = A_normal,
+            A_recession     = A_recession,
+            sigma_base      = sigma_base,
         )
-
         self._rng = np.random.default_rng(seed)
         self._last_trajectory = None
         self._last_noises     = None
@@ -129,7 +137,9 @@ class MacroEconomy:
         env.k = k
         env.nonlinearity = nonlinearity
         env.seed = seed
-        env.factor_names = [f"F{i}" for i in range(k)]
+        env.factor_names = (FACTOR_NAMES[:k]
+                            if k <= len(FACTOR_NAMES)
+                            else [f"F{j}" for j in range(k)])
         env.transition = NonlinearTransition(
             nonlinearity=nonlinearity,
             A_normal=A_normal,
@@ -342,6 +352,21 @@ class MacroEconomy:
         """Per-factor standard deviations from training window."""
         assert self._factor_stds is not None, "Call simulate() first."
         return self._factor_stds
+
+    @classmethod
+    def with_dimension(cls, k: int, nonlinearity: float = 0.5,
+                        seed: int = 42, matrix_seed: int = 0) -> "MacroEconomy":
+        """
+        Create a MacroEconomy with k factors using auto-generated
+        structural matrices. Recommended for k != 5.
+
+        Example
+        ───────
+        >>> env = MacroEconomy.with_dimension(k=20, nonlinearity=0.5)
+        >>> traj = env.simulate(T=500)
+        """
+        return cls(n_factors=k, nonlinearity=nonlinearity,
+                   seed=seed, matrix_seed=matrix_seed)
 
     def __repr__(self) -> str:
         return (f"MacroEconomy(k={self.k}, "

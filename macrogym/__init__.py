@@ -20,20 +20,21 @@ Quick start
     print(f"Direction accuracy: {scores['direction_accuracy']:.3f}")
 """
 
-from macrogym.economy   import MacroEconomy
-from macrogym.shocks    import CounterfactualResult, evaluate_model_counterfactual
-from macrogym.metrics   import BenchmarkResult, compute_full_metrics, run_benchmark, print_benchmark_table
-from macrogym.transitions import NonlinearTransition
+from macrogym.economy      import MacroEconomy
+from macrogym.transitions  import make_structural_matrices
+from macrogym.shocks   import CounterfactualResult, evaluate_model_counterfactual
+from macrogym.metrics  import (BenchmarkResult, compute_full_metrics,
+                                run_benchmark, print_benchmark_table)
 
 __all__ = [
     "MacroEconomy",
     "CounterfactualResult",
     "BenchmarkResult",
-    "NonlinearTransition",
     "evaluate_model_counterfactual",
     "compute_full_metrics",
     "run_benchmark",
     "print_benchmark_table",
+    "make_structural_matrices",
 ]
 
 __version__ = "0.1.0"
